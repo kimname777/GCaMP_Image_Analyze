@@ -152,3 +152,4 @@ dependencies:
       - tqdm==4.67.1
       - typing-extensions==4.15.0
 prefix: C:\Users\user\miniforge3\envs\gcamp-gui
+# GUI env: PySide6 UI + baseline analysis (Suite2p integration, viz, I/O); split from CaImAn to avoid conflicts. 
