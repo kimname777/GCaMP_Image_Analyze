@@ -1,0 +1,14 @@
+name: v1_orientation
+imaging:
+  fps: 30
+preprocess:
+  motion: {backend: identity, block: 64, overlap: 16, max_shift: 15}
+  neuropil: {r: 0.8, inner: 2, outer: 6}
+  bleaching: {method: percentile, p: 10, window_s: 90}
+segmentation:
+  backend: suite2p
+  diameter: 14
+signals:
+  deconvolution: {backend: simple_ar1, ar: 1, gamma: 0.95}
+analysis:
+  tuning: {model: pseudo}

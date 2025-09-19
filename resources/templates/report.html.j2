@@ -1,0 +1,13 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>GCaMP Report</title></head>
+<body>
+<h1>GCaMP Analyzer Report</h1>
+<p>Cells: {{ cells }}, Frames: {{ frames }}</p>
+<ul>
+    {% for k,v in tuning.items() %}
+    <li>{{ k }}: {{ v }}</li>
+    {% endfor %}
+</ul>
+</body>
+</html>
