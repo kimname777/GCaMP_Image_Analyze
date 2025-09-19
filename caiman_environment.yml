@@ -258,3 +258,4 @@ dependencies:
       - yapf==0.43.0
       - zarr==2.18.3
 prefix: C:\Users\user\miniforge3\envs\caiman
+# CaImAn env: CNMF-E backend stack (NumPy/Numba/OpenCV, etc.); isolated to prevent binary dependency conflicts. 
