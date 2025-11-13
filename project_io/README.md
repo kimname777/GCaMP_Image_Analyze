@@ -1,1 +1,1 @@
-Project I/O: loaders, writers, stim, bundle format.  
+Project I/O: loaders, writers, stim, bundle format. 
