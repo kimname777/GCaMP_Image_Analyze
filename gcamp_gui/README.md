@@ -1,1 +1,1 @@
-GUI: app entry, main window, Qt widgets.  
+GUI: app entry, main window, Qt widgets. 
