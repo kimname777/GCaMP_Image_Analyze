@@ -1,1 +1,1 @@
-Viz: image/traces/analysis widgets; Tuning/QC WIP.  
+Viz: image/traces/analysis widgets; Tuning/QC WIP. 
