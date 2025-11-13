@@ -1,1 +1,1 @@
-Signals: traces, baselines, dF/F, deconvolution, QC.  
+Signals: traces, baselines, dF/F, deconvolution, QC. 
