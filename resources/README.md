@@ -1,1 +1,1 @@
-Resources: icons and static assets.  
+Resources: icons and static assets.
