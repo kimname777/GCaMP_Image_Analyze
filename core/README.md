@@ -1,1 +1,1 @@
-Core: config, pipeline, state, logging, tasks.  
+Core: config, pipeline, state, logging, tasks.
