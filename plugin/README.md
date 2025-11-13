@@ -1,1 +1,1 @@
-Plugin: optional extension hooks.  
+Plugin: optional extension hooks. 
