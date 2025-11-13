@@ -476,10 +476,10 @@ class MainWindow(QMainWindow):
 
         self._original_stack: Optional[np.ndarray] = None
         self._preproc_params = dict(b=0.0, c=1.0, g=1.0, eq=False)
-        self._crop_mode_active = True
+        self._crop_mode_active = False
         self._select_mode_active = False
         self._last_crop_mask: Optional[np.ndarray] = None
-        self._active_tool: Optional[str] = None  # 현재 선택 툴 추적
+        self._active_tool: Optional[str] = None  
 
         self._log("Ready.")
 
@@ -704,36 +704,77 @@ class MainWindow(QMainWindow):
     def _begin_rect_select_in_view(self):
         if getattr(self.state, "roi_masks", None) is None:
             self._log("Run pipeline (or import ROIs) first."); return
+
+        # selection 모드 진입: crop 모드는 강제로 OFF, 기존 crop 마스크도 초기화
         self._select_mode_active = True
-        self.viewer.set_draw_tool("rect")
+        self._crop_mode_active = False
+        self._last_crop_mask = None
+
+        if hasattr(self.viewer, "set_draw_tool"):
+            self.viewer.set_draw_tool("rect")
+        if hasattr(self.viewer, "enable_draw_mode"):
+            self.viewer.enable_draw_mode(True)
+
         self._log("Draw a rectangle on image to SELECT cells inside it…")
 
     def _on_viewer_box_drawn(self, mask_bool: np.ndarray):
-        if mask_bool is None or mask_bool.dtype != bool: return
-
-        if self._crop_mode_active:
-            if self._last_crop_mask is None: self._last_crop_mask = mask_bool.copy()
-            else:
-                try: self._last_crop_mask |= mask_bool
-                except ValueError: self._last_crop_mask = mask_bool.copy()
-            self._log("Crop ROI captured (accumulated). Click 'Apply Crop'.")
+        if mask_bool is None or mask_bool.dtype != bool:
             return
 
         if self._select_mode_active:
             self._select_mode_active = False
-            self.viewer.enable_draw_mode(False)
+
+            if hasattr(self.viewer, "enable_draw_mode"):
+                self.viewer.enable_draw_mode(False)
+
+            if hasattr(self.viewer, "clear_crop"):
+                self.viewer.clear_crop()
+            self._last_crop_mask = None  
+
             masks = getattr(self.state, "roi_masks", None)
             if masks is None or masks.size == 0:
                 self._log("No ROI masks."); return
-            inside = [i for i in range(masks.shape[0]) if np.logical_and(masks[i], mask_bool).any()]
+
+            inside = [
+                i for i in range(masks.shape[0])
+                if np.logical_and(masks[i], mask_bool).any()
+            ]
             if not inside:
                 self._log("No cells found in the box.")
+                return
+
+            try:
+                self.traces_tab.check_only(inside)
+            except Exception:
+                pass
+
+            self.viewer.set_show_only_selected(True)
+            self.viewer.set_highlights(inside)
+
+            self._on_selection_for_analysis(inside)
+            return
+
+        if self._crop_mode_active:
+            if self._last_crop_mask is None:
+                self._last_crop_mask = mask_bool.copy()
             else:
-                try: self.traces_tab.check_only(inside)
-                except Exception: pass
-                self.viewer.set_show_only_selected(True)
-                self.viewer.set_highlights(inside)
-                self._on_selection_for_analysis(inside)
+                try:
+                    self._last_crop_mask |= mask_bool
+                except ValueError:
+                    self._last_crop_mask = mask_bool.copy()
+            self._log("Crop ROI captured (accumulated). Click 'Apply Crop'.")
+            return
+
+        if self._crop_mode_active:
+            if self._last_crop_mask is None:
+                self._last_crop_mask = mask_bool.copy()
+            else:
+                try:
+                    self._last_crop_mask |= mask_bool
+                except ValueError:
+                    self._last_crop_mask = mask_bool.copy()
+            self._log("Crop ROI captured (accumulated). Click 'Apply Crop'.")
+
 
     def _on_apply_crop_clicked(self):
         if self._last_crop_mask is None:
@@ -780,7 +821,18 @@ class MainWindow(QMainWindow):
             try:
                 from project_io.writers import save_csv_pack, save_nwb
                 from viz.report import export_report
-                save_csv_pack(outdir, self.state)
+
+                # If available, use the currently CHECKED cells in the Traces tab
+                # to decide which ROIs to export. If anything goes wrong, fall
+                # back to exporting all ROIs.
+                selected_indices = None
+                try:
+                    if getattr(self, "traces_tab", None) is not None and hasattr(self.traces_tab, "current_checked_indices"):
+                        selected_indices = self.traces_tab.current_checked_indices()
+                except Exception:
+                    selected_indices = None
+
+                save_csv_pack(outdir, self.state, selected_indices)
                 export_report(outdir, self.state)
                 save_nwb(outdir / "session.nwb", self.state, fps=self.cfg.fps)
             except Exception as e:
