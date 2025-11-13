@@ -1,1 +1,1 @@
-Preprocess: bleaching, denoise, motion, neuropil.  
+Preprocess: bleaching, denoise, motion, neuropil. 
