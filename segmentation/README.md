@@ -1,1 +1,1 @@
-Segmentation: Suite2p/CaImAn wrappers and ROI utils.  
+Segmentation: Suite2p/CaImAn wrappers and ROI utils. 
