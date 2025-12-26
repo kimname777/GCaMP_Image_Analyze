@@ -152,16 +152,36 @@ class Pipeline:
 
         # 3) Neuropil / Traces / ΔF/F
         yield from push(40, "Neuropil + trace extraction + ΔF/F")
+        # Use a moving-percentile baseline function that respects the
+        # pipeline FPS and an optional baseline window configured in
+        # cfg.preprocess['baseline_win_s'] (default 90s). This is more
+        # robust than a single global P10 baseline.
+        baseline_win_s = float(self.cfg.preprocess.get("baseline_win_s", 90.0))
+        baseline_dropout_frac = float(self.cfg.preprocess.get("baseline_dropout_frac", 0.2))
+        baseline_roi_drop_frac = float(self.cfg.preprocess.get("baseline_roi_drop_frac", 0.2))
+        baseline_invalid_mode = str(self.cfg.preprocess.get("baseline_invalid_mode", "hold"))
+        baseline_fn = lambda F: compute_baseline_moving_percentile(
+            F,
+            p=10.0,
+            win_s=baseline_win_s,
+            fps=float(self.cfg.fps),
+            dropout_frac=baseline_dropout_frac,
+            roi_drop_frac=baseline_roi_drop_frac,
+            invalid_mode=baseline_invalid_mode,
+            roi_thresh_mode=self.cfg.preprocess.get("baseline_roi_thresh_mode", "relative"),
+            roi_percentile=float(self.cfg.preprocess.get("baseline_roi_percentile", 20.0)),
+        )
+
+        neuropil_r = float(self.cfg.preprocess.get("neuropil", {}).get("r", 0.7))
         F_raw, F_np, F0, dff, np_masks = extract_traces(
             self.state.reg_stack, self.state.roi_masks,
-            r=self.cfg.preprocess.get("neuropil", {}).get("r", 0.7),
-            inner=1, outer=4, baseline_fn=None
+            r=neuropil_r,
+            inner=1, outer=4, baseline_fn=baseline_fn
         )
         self.state.F_raw = F_raw
         self.state.F_np = F_np
         self.state.F0 = F0
         self.state.dff = dff.astype("float32", copy=False)
-        # keep both for compatibility
         self.state.np_masks = np_masks.astype(bool, copy=False)
         self.state.neuropil_masks = self.state.np_masks
 

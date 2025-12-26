@@ -14,6 +14,7 @@ Design goals
 
 import numpy as np
 from typing import Callable, Tuple, Union, Optional
+from signals.baselines import compute_baseline_moving_percentile
 
 
 # --- Lightweight dilation fallback (only if preprocess.neuropil is unavailable) ---
@@ -127,11 +128,26 @@ def extract_traces(
     if baseline_fn is not None:
         F0 = baseline_fn(F_corr).astype(np.float32)
     else:
-        # Per-ROI 10th percentile (constant over time, broadcast to (N,T))
-        q10 = np.percentile(F_corr, 10, axis=1, keepdims=True).astype(np.float32)
-        F0 = np.repeat(q10, T, axis=1)
+        # Default: use a moving-percentile baseline (more robust than a
+        # global P10 for signals with drifts or sparse transients). Fall
+        # back to global P10 if moving baseline computation fails.
+        try:
+            # defaults: 10th percentile, 90s window, 30 fps (can be
+            # overridden by passing a custom baseline_fn)
+            F0 = compute_baseline_moving_percentile(F_corr, p=10.0, win_s=90.0, fps=30.0)
+        except Exception:
+            q10 = np.percentile(F_corr, 10, axis=1, keepdims=True).astype(np.float32)
+            F0 = np.repeat(q10, T, axis=1)
 
-    dff = (F_corr - F0) / (F0 + 1e-6)
+    # Safety floor for F0 to avoid huge ratios when baseline is very small
+    # Use a per-ROI floor: max(1e-6, 1% of median(F0))
+    try:
+        median_F0 = np.median(F0, axis=1, keepdims=True)
+        eps = np.maximum(1e-6, 0.01 * np.maximum(median_F0, 1e-6)).astype(np.float32)
+    except Exception:
+        eps = np.float32(1e-6)
+
+    dff = (F_corr - F0) / (F0 + eps)
     return (F_raw.astype(np.float32),
             F_np.astype(np.float32),
             F0.astype(np.float32),

@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as Toolbar
 from matplotlib.figure import Figure
+from gcamp_gui import palette as gui_palette
 
 
 class TracesWidget(QWidget):
@@ -87,7 +88,10 @@ class TracesWidget(QWidget):
         self.btn_all.clicked.connect(self.select_all)
         self.btn_none.clicked.connect(self.select_none)
         self.btn_select_rect.clicked.connect(self.requestRectSelect.emit)
+        # When a checkbox state changes, emit selection and update plot immediately
         self.list.itemChanged.connect(self._emit_selection)
+        self.list.itemChanged.connect(self.apply_selection_to_plot)
+        # When the row selection (highlighting) changes, update plot styling
         self.list.itemSelectionChanged.connect(self.apply_selection_to_plot)
 
     # ---------------- API ----------------
@@ -109,7 +113,9 @@ class TracesWidget(QWidget):
             it.setCheckState(Qt.Checked)
             self.list.addItem(it)
         self.list.blockSignals(False)
+        # Ensure the traces plot reflects the default checked rows immediately
         self._emit_selection()
+        self.apply_selection_to_plot()
 
     def update_traces(self, dff: Optional[np.ndarray], spikes: Optional[np.ndarray]):
         """Refresh traces; rebuild the list if N changed."""
@@ -153,15 +159,18 @@ class TracesWidget(QWidget):
         step = 1.2 * (np.nanstd(self._dff[checked, :]) + 1e-6)
         offset = 0.0
 
+        n_total = int(self._dff.shape[0])
         for i in checked:
             y = self._dff[i] + offset
             lw = 2.0 if i in selected_rows else 1.0
             a = 1.0 if i in selected_rows else 0.85
-            self.ax.plot(t, y, linewidth=lw, alpha=a, label=f"cell {i}")
+            # Use shared palette (colormap-aware) so trace color matches ROI preview
+            c = gui_palette.mpl_color(i, total=n_total)
+            self.ax.plot(t, y, color=c, linewidth=lw, alpha=a, label=f"cell {i}")
             if self._spk is not None and self._spk.shape == self._dff.shape:
                 s = (self._spk[i] > 0).astype(bool)
                 if s.any():
-                    self.ax.plot(t[s], y[s], marker="|", linestyle="None", markersize=8, alpha=0.9)
+                    self.ax.plot(t[s], y[s], marker="|", linestyle="None", markersize=8, alpha=0.9, color=c)
             offset += step
 
         self.ax.set_xlabel("Frame")

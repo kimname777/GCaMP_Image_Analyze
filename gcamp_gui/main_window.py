@@ -7,6 +7,7 @@ from typing import Optional, List
 import numpy as np
 from PySide6.QtCore import Qt, QTimer, Signal, Slot, QCoreApplication
 from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QFont
+from gcamp_gui import palette as gui_palette
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QLabel, QVBoxLayout, QHBoxLayout, QSplitter,
     QStatusBar, QPushButton, QFileDialog, QTabWidget, QFrame, QToolBox,
@@ -33,8 +34,13 @@ class TaskProgress:
         self.label.setText(text)
         if total is None: self.bar.setRange(0, 0)
         else: self.bar.setRange(0, 100); self.bar.setValue(0)
-        self.status.addPermanentWidget(self._box, 0)
-        self._box.show(); self.active = True
+        # Do not add the progress widget to the status bar to avoid UI
+        # layout changes caused by dynamic showing/hiding. Keep progress
+        # information available in the background (console) while preventing
+        # the status bar from resizing the window.
+        # If you want the progress UI later, re-enable addPermanentWidget here.
+        self._box.hide()
+        self.active = True
         QCoreApplication.processEvents()
 
     def set(self, pct: float | int, text: str | None = None):
@@ -45,20 +51,21 @@ class TaskProgress:
             if self.bar.maximum() == 0: self.bar.setRange(0, 100)
             self.bar.setValue(v)
         except Exception: pass
+        # Keep event loop responsive but do not force status-bar updates.
         QCoreApplication.processEvents()
 
     def finish(self, text: str | None = None):
         if not self.active: return
         if text: self.label.setText(text)
-        try: self.status.removeWidget(self._box)
-        except Exception: pass
+        # Widget was never added to status bar; simply mark inactive.
         self.active = False
         QCoreApplication.processEvents()
 
 
 # ---------------- SafeImageView ----------------
 class SafeImageView(QWidget):
-    roiDrawn = Signal(object)  # 최종 ROI 마스크(Bool) 1개(추가분)
+    roiDrawn = Signal(object)
+    roiClicked = Signal(int)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -66,15 +73,18 @@ class SafeImageView(QWidget):
         self._stack: Optional[np.ndarray] = None
         self._roi_masks: Optional[np.ndarray] = None     # (N,H,W)
         self._np_masks: Optional[np.ndarray]  = None     # (N,H,W)
+        # neuropil drawing parameters (in dilation iterations)
+        self._np_inner: int = 1
+        self._np_outer: int = 4
         self._highlights: set[int] = set()
         self._show_only_selected = False
         self._show_rois = True
         self._show_neuropil = False
 
-        # 드로잉 상태
         self._tool: Optional[str] = None   # None|'rect'|'poly'|'free'
         self._dragging = False
-        # rect
+        
+    # rect
         self._p0_img = None
         self._p1_img = None
         # polygon
@@ -84,17 +94,12 @@ class SafeImageView(QWidget):
         # freehand
         self._free_preview_pos: Optional[tuple[float, float]] = None
         self._free_brush_r = 6
-        self._free_temp_mask: Optional[np.ndarray] = None  # 드래그 중 임시 마스크
-        # 누적 Crop 마스크(여러 개 합쳐짐)
+        self._free_temp_mask: Optional[np.ndarray] = None 
         self._crop_mask: Optional[np.ndarray] = None
 
-        self._font = QFont(); self._font.setPointSize(9); self._font.setBold(True)
-        self._palette = [
-            (244, 67, 54), (33, 150, 243), (76, 175, 80), (255, 193, 7),
-            (156, 39, 176), (0, 188, 212), (255, 87, 34), (121, 85, 72),
-            (63, 81, 181), (139, 195, 74), (3, 169, 244), (255, 152, 0),
-            (233, 30, 99), (0, 150, 136), (205, 220, 57), (158, 158, 158),
-        ]
+        self._font = QFont(); self._font.setPointSize(11); self._font.setBold(True)
+        # Use shared palette from gcamp_gui.palette so colors are consistent
+        self._palette = gui_palette.PALETTE
 
         self.lbl = QLabel("No image", self)
         self.lbl.setAlignment(Qt.AlignCenter)
@@ -102,7 +107,6 @@ class SafeImageView(QWidget):
 
         v = QVBoxLayout(self); v.setContentsMargins(0, 0, 0, 0); v.addWidget(self.lbl)
 
-        # 마우스 이벤트가 부모로 오게
         self.setMouseTracking(True)
         self.lbl.setMouseTracking(True)
         self.lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
@@ -131,6 +135,17 @@ class SafeImageView(QWidget):
         self._np_masks = masks.astype(bool, copy=False) if isinstance(masks, np.ndarray) and masks.ndim == 3 else None
         self._redraw()
 
+    def set_neuropil_params(self, inner: int = 1, outer: int = 4):
+        """Set inner/outer dilation iterations used when drawing neuropil rings."""
+        try:
+            inner = int(inner); outer = int(outer)
+            if inner < 0: inner = 0
+            if outer <= inner: outer = inner + 1
+            self._np_inner = inner; self._np_outer = outer
+        except Exception:
+            pass
+        self._redraw()
+
     def set_highlights(self, indices: List[int]):
         if self._roi_masks is None: self._highlights = set()
         else:
@@ -145,25 +160,26 @@ class SafeImageView(QWidget):
     def set_draw_tool(self, tool: Optional[str]):
         """
         tool ∈ {'rect','poly','free', None}
-        - 다른 툴로 '변경'되는 경우: 누적된 ROI(오렌지 마스크) 초기화.
-        - 같은 툴 → 그대로 유지(같은 툴 내에서 계속 누적).
-        - None → 드로잉 해제(진행 중 스케치도 제거), 누적은 유지.
+        Behavior:
+        - If switching to a different tool: clear accumulated ROIs (orange mask).
+        - If selecting the same tool: keep accumulation (continue within the same tool).
+        - If None: cancel drawing mode (remove any in-progress sketch) but keep accumulated ROIs.
         """
         if tool not in (None, 'rect', 'poly', 'free'):
             tool = None
 
         if (self._tool is not None) and (tool is not None) and (tool != self._tool):
-            # 툴 전환 → 누적 ROI 초기화
+            # tool switch -> clear accumulated ROIs
             self.cancel_active_draw(keep_accumulated=False)
         else:
-            # 툴 유지 또는 None → 진행 중만 정리
+            # keep tool or None -> only clear in-progress sketch
             self.cancel_active_draw(keep_accumulated=True if tool is not None else True)
 
         self._tool = tool
         self._redraw()
 
     def enable_draw_mode(self, on: bool):
-        # 외부 호환용: on=True여도 현재 tool=None이면 강제로 툴을 만들지 않음
+        # Compatibility: even if on=True, do not force a draw tool when current tool is None
         if not on:
             self._tool = None
             self.cancel_active_draw(keep_accumulated=True)
@@ -187,10 +203,32 @@ class SafeImageView(QWidget):
     def resizeEvent(self, ev): super().resizeEvent(ev); self._redraw()
 
     def mousePressEvent(self, ev):
-        if self._frame_u8 is None or ev.button() != Qt.LeftButton or not self._tool:
+        if self._frame_u8 is None or ev.button() != Qt.LeftButton:
             return super().mousePressEvent(ev)
         pt = ev.position() if hasattr(ev, "position") else ev.pos()
         iy, ix = self._map_widget_to_image(pt)
+        # If no drawing tool is active, interpret a click as a potential ROI selection
+        if not self._tool:
+            try:
+                if self._roi_masks is not None:
+                    y, x = int(round(iy)), int(round(ix))
+                    H, W = self._frame_u8.shape
+                    if 0 <= y < H and 0 <= x < W:
+                        hits = [i for i in range(self._roi_masks.shape[0]) if self._roi_masks[i, y, x]]
+                        if hits:
+                            idx = int(hits[0])
+                            # toggle highlight for clicked ROI
+                            if idx in self._highlights:
+                                self._highlights.discard(idx)
+                            else:
+                                self._highlights.add(idx)
+                            try: self.roiClicked.emit(idx)
+                            except Exception: pass
+                            self._redraw()
+                            return
+            except Exception:
+                pass
+        
         if self._tool == 'rect':
             self._dragging = True; self._p0_img = (iy, ix); self._p1_img = (iy, ix)
         elif self._tool == 'poly':
@@ -275,7 +313,7 @@ class SafeImageView(QWidget):
     def _mask_from_polygon(self, pts: list[tuple[float, float]]) -> np.ndarray:
         from matplotlib.path import Path
         H, W = self._frame_u8.shape
-        poly = np.array([(x, y) for (y, x) in pts], dtype=float)  # Path는 (x,y)
+        poly = np.array([(x, y) for (y, x) in pts], dtype=float)  # Path expects (x,y)
         if poly.shape[0] < 3: return np.zeros((H, W), dtype=bool)
         path = Path(poly)
         yy, xx = np.mgrid[0:H, 0:W]
@@ -301,9 +339,11 @@ class SafeImageView(QWidget):
         else: self._crop_mask |= mask.astype(bool)
 
     # ---------- painting ----------
-    def _palette_color(self, i: int) -> QColor:
-        r,g,b = self._palette[i % len(self._palette)]
-        return QColor(r, g, b)
+    def _palette_color(self, i: int, total: Optional[int] = None) -> QColor:
+        # Return a Qt QColor for the given ROI index using the shared palette.
+        # If `total` is provided and larger than the discrete palette length,
+        # the palette will use a continuous colormap to avoid repeating colors.
+        return gui_palette.qcolor(i, alpha=255, total=total)
 
     @staticmethod
     def _edge_from_mask(m: np.ndarray) -> np.ndarray:
@@ -312,10 +352,26 @@ class SafeImageView(QWidget):
         e[:,:-1] |= m[:,:-1] ^ m[:,1:]
         return e
 
+    def _dilate_mask(self, mask: np.ndarray, iters: int) -> np.ndarray:
+        """Simple 3x3 dilation (local helper) to visualize neuropil inner/outer."""
+        out = mask.astype(bool, copy=True)
+        for _ in range(int(max(0, int(iters)))):
+            m = out
+            out = (
+                m
+                | np.roll(m, 1, 0) | np.roll(m, -1, 0)
+                | np.roll(m, 1, 1) | np.roll(m, -1, 1)
+                | np.roll(np.roll(m, 1, 0), 1, 1)
+                | np.roll(np.roll(m, 1, 0), -1, 1)
+                | np.roll(np.roll(m, -1, 0), 1, 1)
+                | np.roll(np.roll(m, -1, 0), -1, 1)
+            )
+        return out
+
     def _draw_mask_points(self, p: QPainter, mask: np.ndarray, color: QColor):
         ys, xs = np.where(mask)
         if ys.size == 0: return
-        p.setPen(QPen(color, 0))  # drawPoint는 펜 색을 사용
+        p.setPen(QPen(color, 0))  
         for y, x in zip(ys, xs):
             p.drawPoint(int(x), int(y))
 
@@ -334,24 +390,54 @@ class SafeImageView(QWidget):
         try:
             p.setFont(self._font)
 
-            # 0) 누적 Crop 마스크(오렌지 α≈0.3)
+            # 0) accumulated crop mask (orange, alpha≈0.3)
             if self._crop_mask is not None and self._crop_mask.any():
                 self._draw_mask_points(p, self._crop_mask, QColor(255, 128, 0, 77))
 
-            # 1) 뉴로필 링(항상 전체 ROI에 대해)
-            if self._show_neuropil and (self._np_masks is not None) and (self._roi_masks is not None):
-                N = int(min(self._np_masks.shape[0], self._roi_masks.shape[0]))
+            # 1) Neuropil: draw inner/outer boundaries and translucent ring
+            if self._show_neuropil and (self._roi_masks is not None):
+                N = int(self._roi_masks.shape[0])
+                inner = int(getattr(self, '_np_inner', 1))
+                outer = int(getattr(self, '_np_outer', 4))
                 for i in range(N):
-                    ring = self._np_masks[i]
-                    if not ring.any(): continue
-                    edge = self._edge_from_mask(ring)
-                    ys, xs = np.nonzero(edge)
-                    if ys.size:
-                        col = self._palette_color(i)
-                        p.setPen(QPen(QColor(col.red(), col.green(), col.blue(), 220), 0, Qt.DashLine))
-                        for y, x in zip(ys, xs): p.drawPoint(int(x), int(y))
+                    m = self._roi_masks[i]
+                    if not m.any():
+                        continue
+                    try:
+                        rin = self._dilate_mask(m, inner)
+                        rout = self._dilate_mask(m, outer)
+                    except Exception:
+                        # fallback to ring provided by _np_masks if present
+                        ring = None
+                        if self._np_masks is not None and i < self._np_masks.shape[0]:
+                            ring = self._np_masks[i]
+                        if ring is None or not ring.any():
+                            continue
+                        rin = m
+                        rout = np.logical_or(m, ring)
 
-            # 2) ROI 윤곽 + 라벨
+                    # ring area between inner and outer
+                    ring_area = np.logical_and(rout, ~rin)
+                    # edges
+                    inner_edge = self._edge_from_mask(rin)
+                    outer_edge = self._edge_from_mask(rout)
+
+                    col = self._palette_color(i, total=N)
+                    # fill the ring with translucent color
+                    fill_col = QColor(col.red(), col.green(), col.blue(), 50)
+                    self._draw_mask_points(p, ring_area, fill_col)
+
+                    # draw outer boundary (dashed)
+                    p.setPen(QPen(QColor(col.red(), col.green(), col.blue(), 180), 0, Qt.DashLine))
+                    ys, xs = np.nonzero(outer_edge)
+                    for y, x in zip(ys, xs): p.drawPoint(int(x), int(y))
+
+                    # draw inner boundary (solid)
+                    p.setPen(QPen(QColor(col.red(), col.green(), col.blue(), 220), 0, Qt.SolidLine))
+                    ys, xs = np.nonzero(inner_edge)
+                    for y, x in zip(ys, xs): p.drawPoint(int(x), int(y))
+
+            # 2) ROI outline + label
             if self._show_rois and (self._roi_masks is not None):
                 N = self._roi_masks.shape[0]
                 idxs = [int(i) for i in sorted(self._highlights)] if (self._show_only_selected and self._highlights) else range(N)
@@ -360,7 +446,7 @@ class SafeImageView(QWidget):
                     if not m.any(): continue
                     edge = self._edge_from_mask(m)
                     ys, xs = np.nonzero(edge)
-                    col = self._palette_color(i)
+                    col = self._palette_color(i, total=N)
                     if ys.size:
                         p.setPen(QPen(QColor(col.red(), col.green(), col.blue(), 255), 0))
                         for y, x in zip(ys, xs): p.drawPoint(int(x), int(y))
@@ -370,7 +456,7 @@ class SafeImageView(QWidget):
                         p.setPen(QPen(QColor(0, 0, 0, 220), 0)); p.drawText(cx+1, cy+1, str(i))
                         p.setPen(QPen(QColor(col.red(), col.green(), col.blue(), 255), 0)); p.drawText(cx, cy, str(i))
 
-            # 3) 진행 중 프리뷰(오렌지 채움, 실시간)
+            # 3) in-progress preview (orange fill, realtime)
             orange = QColor(255, 128, 0, 77)
             if self._tool == 'rect' and (self._p0_img is not None) and (self._p1_img is not None):
                 y0, x0 = self._p0_img; y1, x1 = self._p1_img
@@ -384,7 +470,7 @@ class SafeImageView(QWidget):
                     pts = self._poly_pts + ([self._poly_hover] if self._poly_hover else [])
                     if len(pts) >= 3:
                         self._draw_mask_points(p, self._mask_from_polygon(pts), orange)
-                    # 선분/점
+                    # line segments / points
                     p.setPen(QPen(QColor(255, 180, 0, 220), 0))
                     for k in range(len(self._poly_pts)-1):
                         y0, x0 = self._poly_pts[k]; y1, x1 = self._poly_pts[k+1]
@@ -392,7 +478,7 @@ class SafeImageView(QWidget):
                     if self._poly_hover and self._poly_pts:
                         y0, x0 = self._poly_pts[-1]; y1, x1 = self._poly_hover
                         p.drawLine(int(x0), int(y0), int(x1), int(y1))
-                    # 점(시작점 강조)
+                    # points (highlight start)
                     for (yy, xx) in self._poly_pts:
                         p.drawEllipse(int(xx)-2, int(yy)-2, 4, 4)
                     sy, sx = self._poly_pts[0]
@@ -400,14 +486,14 @@ class SafeImageView(QWidget):
                     p.drawEllipse(int(sx)-3, int(sy)-3, 6, 6)
 
             elif self._tool == 'free':
-                # 브러시 프리뷰 링
+                # brush preview ring
                 if self._free_preview_pos is not None:
                     y, x = self._free_preview_pos
                     p.setPen(QPen(QColor(0,0,0,90), 0))
                     p.setBrush(Qt.NoBrush)
                     r = self._free_brush_r
                     p.drawEllipse(int(x)-r, int(y)-r, r*2, r*2)
-                # 드래그 중 임시 채움
+                # temporary fill while dragging
                 if self._free_temp_mask is not None and self._free_temp_mask.any():
                     self._draw_mask_points(p, self._free_temp_mask, orange)
 
@@ -421,12 +507,16 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("GCaMP Calcium Analysis")
-        self.resize(1920, 1230)
+        # Avoid forcing a very large initial size which can cause the window
+        # to jump when other panels (with large minimum sizes) are shown.
+        # Use a reasonable minimum size and let the window manager/ user decide
+        # the actual window geometry.
+        self.setMinimumSize(1920, 1230)
         self.state = AppState()
         self.cfg = AppConfig()
         try:
             if not isinstance(self.cfg.segmentation, dict): self.cfg.segmentation = {}
-            self.cfg.segmentation['backend'] = 'cnmf'  # 기본값 CNMF
+            self.cfg.segmentation['backend'] = 'cnmf'  # default backend CNMF
         except Exception: pass
 
         self.status = QStatusBar(self); self.setStatusBar(self.status)
@@ -446,6 +536,11 @@ class MainWindow(QMainWindow):
         lv.addLayout(header)
 
         self.viewer = SafeImageView()
+        # Connect viewer ROI click -> toggle traces checkbox
+        try:
+            self.viewer.roiClicked.connect(lambda idx: self._on_viewer_roi_clicked(idx))
+        except Exception:
+            pass
 
         self.play_btn = QPushButton("▶ Play")
         self.play_btn.setFixedHeight(44); self.play_btn.setMinimumWidth(160)
@@ -511,7 +606,7 @@ class MainWindow(QMainWindow):
 
         self.traces_tab = TracesWidget()
 
-        # Analysis 탭 상단에 Save/Clear
+    # Add Save/Clear buttons to the top of the Analysis tab
         self.analysis_tab = AnalysisWidget() if AnalysisWidget else QLabel("Analysis")
         self.analysis_page = QWidget()
         ap_v = QVBoxLayout(self.analysis_page); ap_v.setContentsMargins(6,6,6,6); ap_v.setSpacing(6)
@@ -604,7 +699,7 @@ class MainWindow(QMainWindow):
         if hasattr(self.analysis_tab, "reset"):
             try: self.analysis_tab.reset()
             except Exception: pass
-        # 툴 상태/누적도 초기화
+    # reset tool state / accumulated masks
         self._active_tool = None
         self._last_crop_mask = None
         self.viewer.set_draw_tool(None)
@@ -670,7 +765,7 @@ class MainWindow(QMainWindow):
     def _on_draw_tool_selected(self, name: Optional[str]):
         # name ∈ {'rect','poly','free', None}
         name = name if name in ("rect", "poly", "free") else None
-        # 툴 변경 시(MainWindow 레벨)도 last_crop 초기화
+    # When tool changes at MainWindow level, also reset last_crop
         if (self._active_tool is not None) and (name is not None) and (name != self._active_tool):
             self._last_crop_mask = None
         self._active_tool = name
@@ -678,6 +773,29 @@ class MainWindow(QMainWindow):
         self._crop_mode_active = bool(name)
         if hasattr(self.viewer, "set_draw_tool"): self.viewer.set_draw_tool(name)
         if hasattr(self.viewer, "enable_draw_mode"): self.viewer.enable_draw_mode(bool(name))
+
+    def _on_viewer_roi_clicked(self, idx: int):
+        """Toggle the checked state of ROI `idx` in the Traces tab when user
+        clicks an ROI in the image view. Update traces plot accordingly.
+        """
+        try:
+            if getattr(self, 'traces_tab', None) is None: return
+            lw = self.traces_tab
+            if not hasattr(lw, 'list'): return
+            if idx < 0 or idx >= lw.list.count(): return
+            it = lw.list.item(idx)
+            from PySide6.QtCore import Qt
+            new_state = Qt.Unchecked if it.checkState() == Qt.Checked else Qt.Checked
+            lw.list.blockSignals(True)
+            it.setCheckState(new_state)
+            lw.list.blockSignals(False)
+            # Notify traces widget and update plot
+            try: lw._emit_selection()
+            except Exception: pass
+            try: lw.apply_selection_to_plot()
+            except Exception: pass
+        except Exception:
+            pass
 
     def _on_preproc_reset_clicked(self):
         if self._original_stack is None: return
@@ -687,7 +805,7 @@ class MainWindow(QMainWindow):
         self.viewer.set_stack(self.state.raw_stack); self.viewer.set_rois(None); self.viewer.set_neuropil_masks(None)
         self.viewer.set_image(self.state.raw_stack.mean(axis=0))
         self._disable_results_tabs(); self._log("Reset to original stack.")
-        # ROI/툴 상태 리셋
+    # reset ROI/tool state
         self._last_crop_mask = None
         self._active_tool = None
         self.viewer.set_draw_tool(None)
@@ -705,7 +823,7 @@ class MainWindow(QMainWindow):
         if getattr(self.state, "roi_masks", None) is None:
             self._log("Run pipeline (or import ROIs) first."); return
 
-        # selection 모드 진입: crop 모드는 강제로 OFF, 기존 crop 마스크도 초기화
+    # entering selection mode: force crop mode OFF and clear existing crop mask
         self._select_mode_active = True
         self._crop_mode_active = False
         self._last_crop_mask = None
@@ -787,7 +905,7 @@ class MainWindow(QMainWindow):
         self.progress.start("Applying mask to stack…", 100)
         try:
             M = self._last_crop_mask.astype(S.dtype)
-            S2 = S * M[None, :, :]  # ROI 외부는 0(검정)
+            S2 = S * M[None, :, :]  # outside ROI -> 0 (black)
             self.state.raw_stack = S2
             for k in ("reg_stack","roi_masks","np_masks","F_raw","F_np","F0","dff","spikes","tuning_summary","qc_metrics"):
                 if hasattr(self.state, k): setattr(self.state, k, None)
@@ -818,9 +936,24 @@ class MainWindow(QMainWindow):
         try:
             self.progress.start("Saving results…", None)
             outdir.mkdir(parents=True, exist_ok=True)
+            # Build a session folder named after the input file (without ext)
+            session_name = "session"
             try:
-                from project_io.writers import save_csv_pack, save_nwb
-                from viz.report import export_report
+                lbl = (self.file_label.text() or "").strip()
+                if lbl.lower().startswith("file:"):
+                    raw = lbl.split(":", 1)[1].strip()
+                else:
+                    raw = lbl
+                if raw:
+                    session_name = Path(raw).stem
+            except Exception:
+                session_name = "session"
+
+            session_dir = outdir / session_name
+            session_dir.mkdir(parents=True, exist_ok=True)
+
+            try:
+                from project_io.writers import save_results_bundle
 
                 # If available, use the currently CHECKED cells in the Traces tab
                 # to decide which ROIs to export. If anything goes wrong, fall
@@ -832,20 +965,20 @@ class MainWindow(QMainWindow):
                 except Exception:
                     selected_indices = None
 
-                save_csv_pack(outdir, self.state, selected_indices)
-                export_report(outdir, self.state)
-                save_nwb(outdir / "session.nwb", self.state, fps=self.cfg.fps)
+                save_results_bundle(session_dir, self.state, selected_indices)
             except Exception as e:
                 self._log(f"[warn] writers/report: {e}")
-            if getattr(self.state, "roi_masks", None) is not None:
-                np.save(outdir / "roi_masks.npy", self.state.roi_masks.astype(np.uint8))
-            if getattr(self.state, "np_masks", None) is not None:
-                np.save(outdir / "np_masks.npy", self.state.np_masks.astype(np.uint8))
-            if getattr(self.state, "dff", None) is not None:
-                np.save(outdir / "dff.npy", self.state.dff.astype(np.float32))
-            if getattr(self.state, "spikes", None) is not None:
-                np.save(outdir / "spikes.npy", self.state.spikes.astype(np.float32))
-            self._log(f"Saved results to: {outdir}")
+                # Fallback: attempt best-effort saves into the session_dir
+                try:
+                    from project_io.writers import save_csv_pack, save_nwb
+                    from viz.report import export_report
+                    save_csv_pack(session_dir, self.state, selected_indices)
+                    export_report(session_dir, self.state)
+                    save_nwb(session_dir / "session.nwb", self.state, fps=self.cfg.fps)
+                except Exception as ee:
+                    self._log(f"[warn] fallback save failed: {ee}")
+
+            self._log(f"Saved results to: {session_dir}")
         except Exception as e:
             self._err("Save results error", e)
         finally:
@@ -889,6 +1022,10 @@ class MainWindow(QMainWindow):
                     rings.append(ring)
                 self.state.np_masks = np.stack(rings, 0).astype(bool)
             if hasattr(self.viewer, "set_neuropil_masks"):
+                # Push neuropil params so the viewer can render inner/outer
+                if hasattr(self.viewer, "set_neuropil_params"):
+                    try: self.viewer.set_neuropil_params(inner=inner, outer=outer)
+                    except Exception: pass
                 self.viewer.set_neuropil_masks(self.state.np_masks)
 
     # ---------- Save dialog helper ----------
@@ -941,6 +1078,13 @@ class MainWindow(QMainWindow):
                 self._log(f"[{p:3d}%] {msg}"); self.progress.set(p, f"{msg} ({p}%)")
             self.viewer.set_rois(getattr(self.state, "roi_masks", None))
             if hasattr(self.viewer, "set_neuropil_masks"):
+                try:
+                    inner = int(self.cfg.preprocess.get("neuropil", {}).get("inner", 1))
+                    outer = int(self.cfg.preprocess.get("neuropil", {}).get("outer", 4))
+                    if hasattr(self.viewer, "set_neuropil_params"):
+                        self.viewer.set_neuropil_params(inner=inner, outer=outer)
+                except Exception:
+                    pass
                 self.viewer.set_neuropil_masks(getattr(self.state, "np_masks", None))
             self._enable_results_tabs()
             if hasattr(self.traces_tab, "update_traces"):
@@ -1014,12 +1158,12 @@ class MainWindow(QMainWindow):
         return ""
 
     def _log(self, msg: str):
+        # Keep printing to stdout for logs, but do not show messages in the
+        # status bar to avoid UI movement when log text appears/disappears.
         print(msg, flush=True)
-        try: self.status.showMessage(msg, 5000)
-        except Exception: pass
 
     def _err(self, title: str, e: Exception):
         m = f"{title}: {e}\n{traceback.format_exc()}"
         print(m, flush=True)
-        try: self.status.showMessage(f"{title}: {e}", 8000)
-        except Exception: pass
+        # Do not display error messages in the status bar (keeps UI stable).
+        # Errors still printed to stdout/stderr for diagnostics.

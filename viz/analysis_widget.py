@@ -118,7 +118,9 @@ class AnalysisWidget(QWidget):
 
         self.canvas = FigureCanvas(self.fig)
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.canvas.setMinimumSize(720, 420)
+        # Lower the hard minimum so showing this panel doesn't force the main
+        # window to expand unexpectedly. The canvas can still grow via layouts.
+        self.canvas.setMinimumSize(320, 240)
         self.toolbar = Toolbar(self.canvas, self)
 
         root.addWidget(self.toolbar, 0)

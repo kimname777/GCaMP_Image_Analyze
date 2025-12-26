@@ -1,15 +1,17 @@
 # GCaMP Image Analyse (GUI)
 
-![OS](https://img.shields.io/badge/OS-Windows%20|%20macOS%20|%20Linux-informational)
-![UI](https://img.shields.io/badge/GUI-PySide6-blue)
-![Status](https://img.shields.io/badge/Tuning%20%2F%20QC-WIP-orange)
-
 A lightweight GUI pipeline for GCaMP calcium imaging: **preprocessing → segmentation → trace extraction / deconvolution → reporting**.  
 Designed to run on Windows/macOS/Linux and to **gracefully degrade** when optional scientific stacks are missing.
 
 ---
 
-## ✨ Why two environments?
+<p align="center">
+  <img src="graphics/main_image.png" alt="Main Screen" width="900">
+</p>
+
+---
+
+## Why two environments?
 
 This project ships (and expects) **two separate Conda environments**:
 
@@ -22,7 +24,7 @@ This project ships (and expects) **two separate Conda environments**:
 
 ---
 
-## 🧰 Installation
+## Installation
 
 1. Install **Conda/Mamba** (Miniconda or Mambaforge recommended).
 2. Create the two environments from the YAML files in the project root:
@@ -30,16 +32,16 @@ This project ships (and expects) **two separate Conda environments**:
 ```bash
 # main GUI environment
 conda env create -f gcamp_gui_environment.yml -n gcamp-gui
+```
 
+```bash
 # CaImAn (CNMF-E) environment
 conda env create -f caiman_environment.yml -n caiman
 ```
 
-> If your YAML already contains a `name:` field you can omit `-n …`.
-
 ---
 
-## ▶️ Running the app
+## Running the app
 
 ```bash
 conda activate gcamp-gui
@@ -51,7 +53,7 @@ That’s it—this opens the GUI. CNMF-E (if you choose the **`cnmf`** backend) 
 
 ---
 
-## 🌟 Features (high-level)
+## Features (high-level)
 
 - **Preprocess**: photobleaching removal, denoising *(Gaussian/median/mean/wavelet/BM3D\*)*, motion correction *(rigid FFT phase correlation)*  
 - **Segmentation**: Suite2p *(spawned in a subprocess)*, CaImAn CNMF-E *(runs in `caiman` env)*, or a minimal **threshold** fallback  
@@ -65,17 +67,17 @@ That’s it—this opens the GUI. CNMF-E (if you choose the **`cnmf`** backend) 
 
 ---
 
-## 🧪 Backends
+## Backends
 
 - `suite2p` — recommended default; runs headless in a child process  
 - `cnmf` — CaImAn CNMF-E; requires the `caiman` environment  
 - `threshold` — minimal fallback (fast, few dependencies)
-
-Pick the backend in the **Params** panel.
+- `oasis` — OASIS deconvolution (fast, FOOPSI-based). Uses an efficient constrained deconvolution (L1 sparsity penalty λ) and is a good default for large datasets and interactive use.
+- `mlspike` — MLSpike model-based deconvolution. Uses a generative biophysical model (parameters like tau, a, sigma); can give more accurate spike timing when tuned, but is typically slower and may require parameter estimation for best results.
 
 ---
 
-## 🔁 Basic workflow
+## Basic workflow
 
 1. Load your movie *(TIFF/NPY/AVI/MP4)*  
 2. *(Optional)* Adjust preprocessing *(brightness/contrast preview, crop, bleaching, denoise, motion correction)*  
@@ -86,7 +88,7 @@ Pick the backend in the **Params** panel.
 
 ---
 
-## 🙏 Attribution & prior art
+## Attribution & prior art
 
 Parts of this codebase were **inspired by or adapted from**:
 
@@ -94,7 +96,7 @@ Parts of this codebase were **inspired by or adapted from**:
 
 ---
 
-## ⚠️ Known limitations
+## Known limitations
 
 - **Tuning / QC**: present in the UI but **under development**; behavior may change  
 - Best portability when exporting envs with:
@@ -121,14 +123,14 @@ conda env export --no-builds > environment.yml
 
 ---
 
-## 📜 License
+## License
 
 This project uses multiple third-party packages (Suite2p, CaImAn, OASIS, etc.).  
 Please consult and comply with each project’s license when distributing or modifying derived components.
 
 ---
 
-## 🔷 One-line recap
+## One-line recap
 
 > Use **two Conda envs** (to avoid dependency conflicts), activate **`gcamp-gui`**, then  
 > `cd .GCAMP_IMAGE_ANALYSE && python -m gcamp_gui.app` to launch.  
