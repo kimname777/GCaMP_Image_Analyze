@@ -45,7 +45,11 @@ conda env create -f caiman_environment.yml -n caiman
 
 ```bash
 conda activate gcamp-gui
+```
+```bash
 cd .GCaMP_Image_Analyze
+```
+```bash
 python -m gcamp_gui.app
 ```
 
